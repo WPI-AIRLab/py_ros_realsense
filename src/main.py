@@ -9,6 +9,7 @@ import rospy
 
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
+from std_msgs.msg import Header
 from std_srvs.srv import Trigger, TriggerResponse
 from py_ros_realsense.srv import VideoRecording, VideoRecordingResponse
 
@@ -32,6 +33,7 @@ class rs_get():
         self.image_pub = rospy.Publisher(self.alias+"/color/raw", Image, queue_size = 10)
         self.k_pub = rospy.Publisher(self.alias+"/color/camera_info", CameraInfo, queue_size = 10)
         self.depth_pub = rospy.Publisher(self.alias+"/depth/raw", Image, queue_size = 10)
+        self.pc_pub = rospy.Publisher(self.alias+"/depth/color/points", PointCloud2, queue_size=1)
         self.bridge = CvBridge()
 
         self.pipeline = rs.pipeline()
@@ -55,17 +57,28 @@ class rs_get():
         self.cam_info.K = self.k
         self.is_data_updated = False
 
-        ## wait for 1s to maker sure color images arrive
-        rospy.sleep(1)
-        self.color_img = np.zeros((height, width, 3))
-        self.depth_1d = np.zeros((height, width, 3))
-        self.get_rgbd()
+        ## prepare for converting depth information to point cloud
+        self.x_scale = (np.arange(self.width, dtype=np.float32)-self.cam_info.K[2])/self.cam_info.K[0] ## (ix-cx)/fx
+        self.y_scale = (np.arange(self.height, dtype=np.float32)-self.cam_info.K[5])/self.cam_info.K[4] ## (iy-cy)/fy
 
         self.recording = False
+        self.out = None ## videoWriter handle
         self.lock = threading.Lock()
         # self.start_srv = rospy.Service(self.alias+"/start_recording", Trigger, self.start_recording)
         self.start_srv = rospy.Service(self.alias+"/start_recording", VideoRecording, self.start_recording)
         self.stop_srv  = rospy.Service(self.alias+"/stop_recording",  Trigger, self.stop_recording)
+
+        ## wait for 1s to maker sure color images arrive
+        rospy.sleep(1)
+        self.color_img = np.zeros((height, width, 3))
+        self.depth_1d = np.zeros((height, width, 3))
+        self.pc_msg = None
+
+        data_retrieved = self.get_rgbd()
+        while data_retrieved == False:
+            print("waiting for data...")
+            rospy.sleep(0.03)
+            data_retrieved = self.get_rgbd()
 
     def set_config(self, config):
         ## config = "Default", "High Accuracy", "High Density"
@@ -78,10 +91,10 @@ class rs_get():
             if visual_preset == config:
                 self.depth_sensor.set_option(rs.option.visual_preset, i)
 
-        data_retrieve = -1
-        while data_retrieve == -1:
+        data_retrieved = False
+        while data_retrieved == False:
             print("waiting for data...")
-            data_retrieve = self.get_rgbd()
+            data_retrieved = self.get_rgbd()
 
     def get_cam_param(self):
         st_profile = self.profile.get_stream(rs.stream.depth)
@@ -118,18 +131,50 @@ class rs_get():
                 return -1
 
             self.color_img = np.asanyarray(color_frame.get_data())
-            self.depth_1d = np.asanyarray(aligned_depth_frame.get_data())
-            
+            self.depth_1d = np.asanyarray(aligned_depth_frame.get_data()) ## This is z
 
-            with self.lock:
+            ## pack data into as pointcloud2
+            ## need scale? z = self.depth1d 
+            z = self.depth_1d * self.depth_scale
+            x = self.x_scale[None, :] * z
+            y = self.y_scale[:, None] * z
+            valid = (z>0.1) & (z<5.0) ## let's say the objects are from 0.1m to 5.0m 
+            x[~valid] = np.nan
+            y[~valid] = np.nan
+            z[~valid] = np.nan
+            ## pack rgb
+            r = self.color_img[:,:,2].astype(np.uint32)
+            g = self.color_img[:,:,1].astype(np.uint32)
+            b = self.color_img[:,:,0].astype(np.uint32)
+            rgb = (r<<16)|(g<<8)|b
+
+            ## pack cloud data
+            cloud = np.zeros((self.height, self.width), dtype=[('x', np.float32), ('y', np.float32),\
+                                                               ('z', np.float32), ('rgb', np.uint32)])
+            cloud['x'], cloud['y'], cloud['z'], cloud['rgb'] = x, y, z, rgb
+            self.pc_msg = PointCloud2()
+            self.pc_msg.header = Header(stamp=rospy.Time.now(), frame_id=self.cam_info.header.frame_id)
+            self.pc_msg.height = self.height
+            self.pc_msg.width = self.width
+            self.pc_msg.fields = [PointField('x', 0, PointField.FLOAT32, 1), PointField('y', 4, PointField.FLOAT32, 1),\
+                          PointField('z', 8, PointField.FLOAT32, 1), PointField('rgb', 12, PointField.UINT32, 1),]
+            self.pc_msg.is_bigendian = False
+            self.pc_msg.point_step = 16
+            self.pc_msg.row_step = self.pc_msg.point_step * self.width
+            self.pc_msg.is_dense = False
+            self.pc_msg.data = cloud.tobytes()
+            
+            with self.lock: ## write to video stream
                 if self.out is not None:
                     # frame = self.bridge.imgmsg_to_cv2(color_image, "bgr8")
                     # self.out.write(frame)
                     self.out.write(self.color_img)
-            return 1
 
-        except:
-            return -1
+            return True
+
+        except Exception as e:
+            print(e)
+            return False
 
     def pub_data(self):
         img_msg = self.bridge.cv2_to_imgmsg(self.color_img, encoding="bgr8")
@@ -137,6 +182,8 @@ class rs_get():
         depth_msg = self.bridge.cv2_to_imgmsg(self.depth_1d)
         self.depth_pub.publish(depth_msg)
         self.k_pub.publish(self.cam_info)
+        if self.pc_msg is not None:
+            self.pc_pub.publish(self.pc_msg)
 
     def start_recording(self, req):
         with self.lock:
@@ -193,6 +240,6 @@ if __name__ == '__main__':
     rate = rospy.Rate(30)
 
     while not rospy.is_shutdown():
-        front_cam.get_rgbd()
+        data_retrieved = front_cam.get_rgbd()
         front_cam.pub_data()
         rate.sleep()

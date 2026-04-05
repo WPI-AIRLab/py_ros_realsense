@@ -2,7 +2,7 @@
 
 import sys, copy, time, cv2, rospy
 import numpy as np
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, CameraInfo, PointCloud2
 from cv_bridge import CvBridge
 import pyrealsense2 as rs
 
