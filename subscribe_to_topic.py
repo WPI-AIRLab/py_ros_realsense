@@ -31,14 +31,31 @@ class Camera():
         self.color_debug = np.zeros((self.height, self.width, 3))
         self.debug_pub = rospy.Publisher("/py_ros_realsense_test/debug", Image, queue_size = 10)
 
-        self.sub = rospy.Subscriber("/front_cam/color/raw", Image, self.callback, queue_size=1)
+        # self.sub = rospy.Subscriber("/front_cam/color/raw", Image, self.callback_color, queue_size=1)
+        self.sub = rospy.Subscriber("/front_cam/depth/color/points", PointCloud2, self.callback, queue_size=1)
+        self.dtype = np.dtype([('x', np.float32), ('y', np.float32), ('z', np.float32), ('rgb', np.uint32),])
+        self.rgb = np.zeros((self.height, self.width, 3))
+        self.bgr = np.zeros((self.height, self.width, 3))
 
     def callback(self, msg):
-        try:
-            self.color_raw = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        except Exception as e:
-            rospy.logerr(f"CV_BRIDGE EXCEPTION: {e}")
-            return
+        # ## sub to "/front_cam/color/raw"
+        # try:
+        #     self.color_raw = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        # except Exception as e:
+        #     rospy.logerr(f"CV_BRIDGE EXCEPTION: {e}")
+        #     return
+
+        ## sub to "/front_cam/depth/color/points"
+        h, w = msg.height, msg.width
+        pc = np.frombuffer(msg.data, dtype=self.dtype).reshape(h,w)
+        xyz = np.stack([pc['x'], pc['y'], pc['z']], axis=-1) ## (h,w,3)
+
+        rgb_uint32 = pc['rgb']
+        r = (rgb_uint32 >> 16) & 255
+        g = (rgb_uint32 >> 8) & 255
+        b = rgb_uint32 & 255
+        self.rgb = np.stack([r,g,b], axis=-1).astype(np.uint8)
+        self.color_raw = self.rgb[..., ::-1]
         
     def get_rgbd(self):
         self.color_debug = copy.deepcopy(self.color_raw)
