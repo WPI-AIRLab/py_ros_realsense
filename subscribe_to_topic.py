@@ -46,7 +46,7 @@ class Camera():
         #     return
 
         ## sub to "/front_cam/depth/color/points"
-        h, w = msg.height, msg.width
+        h, w = msg.height, msg.width ## This is not self.height, self.width (not image size)
         pc = np.frombuffer(msg.data, dtype=self.dtype).reshape(h,w)
         xyz = np.stack([pc['x'], pc['y'], pc['z']], axis=-1) ## (h,w,3)
 
