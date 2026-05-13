@@ -4,8 +4,10 @@
   <arg name="rs_serial_no" default="851112063978"/>
   
   <!--Replace your node name if needed-->
+  <!--Provide a ht_file, the camera should read from that file to get the homogeneous transformation matrix-->
   <node name="front_cam" pkg="py_ros_realsense" type="main.py" respawn="false" output="screen">
     <param name="rs_serial_no" type="string" value="$(arg rs_serial_no)"/>
+    <param name="ht_file" type="string" value="$(find py_ros_realsense)/src/cam_ht.pickle"/>
   </node>
 
 </launch>

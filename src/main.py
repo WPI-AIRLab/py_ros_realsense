@@ -3,9 +3,10 @@
 # Covert raw RealSense Depth data to RViz PointCloud2 data
 # Use Pyrealsense2 to obtain RS data, no launch file is needed
 
-import os, sys, copy, time, cv2, threading
+import os, sys, copy, time, cv2, threading, pickle
 import numpy as np
 import rospy
+import workspace_tf as ws_tf
 
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
@@ -16,7 +17,7 @@ from py_ros_realsense.srv import VideoRecording, VideoRecordingResponse
 import pyrealsense2 as rs
 
 class rs_get():
-    def __init__(self, serial, alias="", width = 1280, height = 720):
+    def __init__(self, serial, alias="", ht = np.eye(4), width = 1280, height = 720):
         '''
         serial: The serial NO. of the RealSense
         alias: name your camera topic
@@ -29,6 +30,7 @@ class rs_get():
 
         self.height = height
         self.width = width
+        self.ht = ht
 
         self.image_pub = rospy.Publisher(self.alias+"/color/raw", Image, queue_size = 10)
         self.k_pub = rospy.Publisher(self.alias+"/color/camera_info", CameraInfo, queue_size = 10)
@@ -53,7 +55,11 @@ class rs_get():
         self.cam_info = CameraInfo()
         self.cam_info.width = self.width
         self.cam_info.height = self.height
-        self.cam_info.header.frame_id = "camera_link"
+        if not np.allclose(self.ht, np.eye(4)):
+            self.cam_info.header.frame_id = "world"
+        else:
+            ## remove "/" in alias to make it a valid frame_id
+            self.cam_info.header.frame_id = self.alias.replace("/", "")+"_link"
         self.cam_info.K = self.k
         self.is_data_updated = False
 
@@ -142,6 +148,13 @@ class rs_get():
             x[~valid] = np.nan
             y[~valid] = np.nan
             z[~valid] = np.nan
+            ## convert to world frame by given self.ht
+            self.xyz_cam = np.stack([x, y, z], axis=-1) ## (h,w,3)
+            self.xyz_world = self.xyz_cam @ self.ht[:3, :3].T + self.ht[:3, 3]
+            x = self.xyz_world[:, :, 0]
+            y = self.xyz_world[:, :, 1]
+            z = self.xyz_world[:, :, 2]
+
             ## pack rgb
             r = self.color_img[:,:,2].astype(np.uint32)
             g = self.color_img[:,:,1].astype(np.uint32)
@@ -223,10 +236,24 @@ class rs_get():
 
 if __name__ == '__main__':
     print(cv2.__version__)
-    rospy.init_node("d405", anonymous = True)
+    rospy.init_node("realsense", anonymous = True)
     np.set_printoptions(suppress=True)
 
     serial_no = rospy.get_param("~rs_serial_no", None)
+    ht_filename = rospy.get_param("~ht_file", None)
+    cam_ht = None
+
+    if ht_filename not in ["", None] and os.path.isfile(ht_filename):
+        with open(ht_filename, "rb") as handle:
+            data = pickle.load(handle)
+        if isinstance(data, list) and len(data) > 0:
+            cam_ht = data[0]
+            print("Get Camera transformation to the world: \n", cam_ht)
+
+    if cam_ht is None:
+        cam_ht = np.eye(4)
+        print("Get Camera transformation to the world: \n", cam_ht)
+    
     if serial_no is None:
         rospy.logwarn("NO serial number IS PROVIDED!")
         serial_no = "851112063978"
@@ -234,7 +261,9 @@ if __name__ == '__main__':
         print("Get serial number from parameters: "+serial_no)
 
     alias = rospy.get_name()
-    front_cam = rs_get(serial_no, alias=alias)
+    tf = ws_tf.workspace_tf()
+    tf.add_static_tf("world", alias.replace("/", "")+"_link", cam_ht)
+    front_cam = rs_get(serial_no, alias=alias, ht=cam_ht)
 
     rospy.sleep(1)
     rate = rospy.Rate(30)
