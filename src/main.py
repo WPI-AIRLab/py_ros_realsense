@@ -73,6 +73,7 @@ class rs_get():
         # self.start_srv = rospy.Service(self.alias+"/start_recording", Trigger, self.start_recording)
         self.start_srv = rospy.Service(self.alias+"/start_recording", VideoRecording, self.start_recording)
         self.stop_srv  = rospy.Service(self.alias+"/stop_recording",  Trigger, self.stop_recording)
+        self.ht_reload_srv = rospy.Service(self.alias+"/reload_ht", Trigger, self.reload_ht)
 
         ## wait for 1s to maker sure color images arrive
         rospy.sleep(1)
@@ -232,6 +233,19 @@ class rs_get():
         rospy.loginfo("Recording stopped.")
         return TriggerResponse(success=True, message="Recording stopped.")
         # return VideoRecordingResponse(success=True, message="Recording stopped.")
+
+    def reload_ht(self, req):
+        with self.lock:
+            ht_filename = rospy.get_param("~ht_file", None)
+            if ht_filename not in ["", None] and os.path.isfile(ht_filename):
+                with open(ht_filename, "rb") as handle:
+                    data = pickle.load(handle)
+                if isinstance(data, list) and len(data) > 0:
+                    self.ht = data[0]
+                    rospy.loginfo("new Camera transformation to the world reloaded: \n"+str(self.ht))
+                    return TriggerResponse(success=True, message="new HT reloaded.")
+            rospy.logwarn("Failed to reload HT! Check the file path and content.")
+            return TriggerResponse(success=False, message="Failed to reload HT! Check the file path and content.")
 
 
 if __name__ == '__main__':
